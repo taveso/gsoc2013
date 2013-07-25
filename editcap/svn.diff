@@ -1,0 +1,56 @@
+Index: editcap.c
+===================================================================
+--- editcap.c	(revision 50481)
++++ editcap.c	(working copy)
+@@ -873,6 +873,8 @@
+   gchar *fprefix = NULL;
+   gchar *fsuffix = NULL;
+   char appname[100];
++  guint64 region_start = ULLONG_MAX;
++  guint64 region_size = 0;
+ 
+ #ifdef HAVE_PLUGINS
+   char* init_progfile_dir_error;
+@@ -900,7 +902,7 @@
+ #endif
+ 
+   /* Process the options */
+-  while ((opt = getopt(argc, argv, "A:B:c:C:dD:E:F:hrs:i:t:S:T:vw:")) !=-1) {
++  while ((opt = getopt(argc, argv, "A:B:c:C:dD:E:F:hrs:i:t:S:T:vw:X:Y:")) !=-1) {
+ 
+     switch (opt) {
+ 
+@@ -1072,6 +1074,18 @@
+       stoptime = mktime(&stoptm);
+       break;
+     }
++    
++    case 'X':
++      region_start = strtoull(optarg, &p, 10);
++      break;
++    
++    case 'Y':
++      region_size = strtoull(optarg, &p, 10);
++      if (region_start == ULLONG_MAX) {
++      	fprintf(stderr, "editcap: you must specify a region start\n");
++        exit(1);
++      }
++      break;
+     }
+ 
+   }
+@@ -1447,7 +1461,13 @@
+             real_data_start = find_dct2000_real_data(buf);
+           }
+           for (i = real_data_start; i < (int) phdr->caplen; i++) {
+-            if (rand() <= err_prob * RAND_MAX) {
++          	if (region_start != ULLONG_MAX)
++          	{
++          		guint64 offset = data_offset+i;
++          		if (offset < region_start || offset > region_start+region_size)
++          			continue;
++          	}
++          	if (rand() <= err_prob * RAND_MAX) {
+               err_type = rand() / (RAND_MAX / ERR_WT_TOTAL + 1);
+ 
+               if (err_type < ERR_WT_BIT) {
