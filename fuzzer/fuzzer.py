@@ -2,9 +2,10 @@
 
 import sys
 from optparse import OptionParser
-from os import listdir
 from collections import deque
+import os
 import commands
+import subprocess
 import random
 import time
 
@@ -15,118 +16,180 @@ pin = ""
 pintool = ""
 menagerie = ""
 
-fuzzed_captures_dir = "fuzzed-captures"
-err_prob = 0.02
-AAA = 4
+# the destination directory of the fuzzed capture files
+fuzzed_captures_dir = "/tmp"
+# the error probability of Editcap
+err_prob = 0.08
+# the number of random fuzz per capture file of the fuzzing queue
+total_rand_fuzz_per_cap = 4
 
-fuzzing_queue = None
+# the fuzzing queue containing the capture files to fuzz
+fuzzing_queue = deque()
+# the branches we have already taken in the execution path of the fuzzed process
 taken_branches = set()
-pcap_region_dict = {}
+# dictionary which keys are names of capture files originating from a random fuzzing.
+# The value associated with each capture file is a tuple containing the start and end offsets of the fuzzed region.
+cap_region_dict = {}
 
-def edit_pcap(pcap, region_start, region_end):
-	new_pcap = "%s/%s-%f" % (fuzzed_captures_dir, pcap, time.time())	
-	commands.getoutput("%s -E %d -X %d -Y %d %s/%s %s/%s" % (editcap, err_prob, region_start, region_end, menagerie, pcap, menagerie, new_pcap))	
-	return new_pcap
+## Fuzz a region of a capture file using Editcap.
+#  @param[in]	cap	capture file to fuzz
+#  @param[in]	region_start	start offset of the region
+#  @param[in]	region_end	end offset of the region
+#  @return		the fuzzed capture file
+def edit_cap_region(cap, region_start, region_end):
+	new_cap = "%s/%s-%f" % (fuzzed_captures_dir, filename(cap), time.time())	
+	commands.getoutput("%s -E %d -X %d -Y %d %s %s" % (editcap, err_prob, region_start, region_end, cap, new_cap))
+	return new_cap
 		
-def smartly_fuzz_pcap(pcap):
+## Fuzz regions of a capture file, thus creating new capture files. 
+## The regions are know to affect the execution path of TShark.
+#  @param[in]	cap	capture file to fuzz
+#  @return		the fuzzed capture files
+def smartly_fuzz_cap(cap):
 	new_captures = []
 	
-	print 'regions:\t %d' % len(pcap_region_dict.values())
+	print 'regions:\t %d' % len(cap_region_dict)
 	
-	for region in pcap_region_dict.values():
-		region_start, region_end = region
-		
-		new_pcap = edit_pcap(pcap, region_start, region_end)
-		if new_pcap != None:
-			new_captures.append(new_pcap)
+	for region in cap_region_dict.values():
+		region_start, region_end = region		
+		new_cap = edit_cap_region(cap, region_start, region_end)
+		new_captures.append(new_cap)
 	
 	return new_captures
-	
-def get_pcap_size(pcap):
-	size = commands.getoutput("wc -c < %s/%s" % (menagerie, pcap))
+
+## Get file size in bytes.
+#  @param[in]	cap	file to process
+#  @return		the file size
+def get_cap_size(cap):
+	size = commands.getoutput("wc -c < %s" % cap)
 	return int(size)
 	
-def randomly_fuzz_pcap(pcap):
+## Fuzz random regions of a capture file, thus creating new capture files.
+#  @param[in]	cap	capture file to fuzz
+#  @return		the fuzzed capture files
+def randomly_fuzz_cap(cap):
 	new_captures = []	
 	
-	pcap_size = get_pcap_size(pcap)	
-	for i in range(AAA):
-		region_start = random.randint(0, pcap_size)
-		region_end = random.randint(0, pcap_size)
+	cap_size = get_cap_size(cap)	
+	for i in range(total_rand_fuzz_per_cap):
+		region_start = random.randint(0, cap_size)
+		region_end = random.randint(0, cap_size)
 		if region_start > region_end:
 			region_start, region_end = region_end, region_start
 			
-		new_pcap = edit_pcap(pcap, region_start, region_end)
-		if new_pcap != None:
-			new_captures.append(new_pcap)
-			pcap_region_dict[new_pcap] = (region_start, region_end)
+		new_cap = edit_cap_region(cap, region_start, region_end)
+		new_captures.append(new_cap)
+		cap_region_dict[new_cap] = (region_start, region_end)
 		
 	return new_captures
 	
+## Read the execution path of a capture file and determine whether it is new.
+#  @param[in]	branches	execution path of the capture file
+#  @return		true if the execution path is new, false otherwise
 def path_is_new(branches):
 	for branch in branches:
 		if branch not in taken_branches:
 			return True			
 	return False
 
-def get_pcap_path(pcap):
-	commands.getoutput("%s -injection child -t %s -- %s -nVxr %s/%s > /dev/null" % (pin, pintool, tshark, menagerie, pcap))	
+## Read the execution path of a capture file.
+#  @param[in]	cap	capture file to process
+#  @return		the execution path of the capture file
+def get_cap_path(cap):
+	cmd = "%s -injection child -t %s -- %s -nVxr %s > /dev/null" % (pin, pintool, tshark, cap)
+	
+	retcode = subprocess.call(cmd, shell=True)
+	# if TShark exited with an unexpected code (139 for segmentation fault)
+	if (retcode > 0):
+		print "TShark returned %d while processing %s" % (retcode, cap)
+	
 	branches = [line.strip() for line in open("MyPinTool.out")]
 	return branches
 	
-def process_pcap(pcap, test):
-	global taken_branches
+## Read the execution path of a capture file, 
+## queue the capture file in the fuzzing queue if the execution path is new
+## and store the execution path in the global taken_branches set.
+#  @param[in]	cap	capture file to process
+#  @param[in]	src	source of the capture file: either menagerie or random (fuzzing) or smart (fuzzing)
+def process_cap(cap, src):
+	global fuzzing_queue, taken_branches
 	
-	if pcap in pcap_region_dict:
-		print 'process_pcap:\t %s (%s) [%d,%d]' % (pcap, test, pcap_region_dict[pcap][0], pcap_region_dict[pcap][1])
+	if cap in cap_region_dict:
+		print 'process_cap:\t %s (%s) [%d,%d]' % (cap, src, cap_region_dict[cap][0], cap_region_dict[cap][1])
 	else:
-		print 'process_pcap:\t %s (%s)' % (pcap, test)
+		print 'process_cap:\t %s (%s)' % (cap, src)
 	
-	branches = get_pcap_path(pcap)
+	branches = get_cap_path(cap)
 	
 	if path_is_new(branches):
-		if pcap in pcap_region_dict:
-			print '\033[92mpath_is_new:\t %s (%s) [%d,%d]\033[0m' % (pcap, test, pcap_region_dict[pcap][0], pcap_region_dict[pcap][1])
-		else:
-			print '\033[92mpath_is_new:\t %s (%s)\033[0m' % (pcap, test)
-		fuzzing_queue.append(pcap)
+		print '\033[92mpath_is_new:\t %s (%s)\033[0m' % (cap, src)
+		fuzzing_queue.append(cap)
 	else:
-		if pcap in pcap_region_dict:
-			del pcap_region_dict[pcap]
+		# if the capture file originates from a random fuzzing we will not remember the region for further testing
+		if cap in cap_region_dict:
+			del cap_region_dict[cap]
 			
 	taken_branches |= set(branches)
 
-def fuzz_pcap(pcap):
-	process_pcap(pcap, "menagerie")
+## Fuzz a capture file, thus creating new capture files, and process them with TShark.
+#  @param[in]	cap	capture file to fuzz
+def fuzz_cap(cap):
+	process_cap(cap, "menagerie")
 	
-	random_captures = randomly_fuzz_pcap(pcap)
+	# randomly fuzz
+	random_captures = randomly_fuzz_cap(cap)
 	for capture in random_captures:
-		process_pcap(capture, "random")
+		process_cap(capture, "random")
 	
-	smart_captures = smartly_fuzz_pcap(pcap)
+	# smartly fuzz
+	smart_captures = smartly_fuzz_cap(cap)
 	for capture in smart_captures:
-		process_pcap(capture, "smart")
-			
-def file_is_pcap(filename):
-	error = commands.getoutput("capinfos %s/%s > /dev/null" % (menagerie, filename))
+		process_cap(capture, "smart")
+		
+## Extract file name from path.
+#  @param[in]	f file path
+#  @return		the file name
+def filename(f):
+	return f.rsplit('/', 1)[1]
+	
+## Process a capture file with Editcap (without options).
+## The data of the capture file remains unchanged but the output file size is bigger.
+#  @param[in]	cap	capture file to process
+#  @return		Editcap	output file
+def edit_cap(cap):
+	new_cap = "%s/%s" % (fuzzed_captures_dir, filename(cap))
+	commands.getoutput("%s %s %s" % (editcap, cap, new_cap))
+	return new_cap
+	
+## Check if a file is a capture file.
+#  @param[in]	f	file to process
+#  @return		true if f is a capture file, false otherwise	
+def file_is_cap(f):
+	error = commands.getoutput("capinfos %s > /dev/null" % f)
 	if error:
 		return False		
 	return True
-			
+		
+## Process the menagerie capture files with Editcap (without options) and seed the fuzzing queue with the resulting captures files.
 def seed_fuzzing_queue():
 	global fuzzing_queue
-
-	files = listdir(menagerie)
-	fuzzing_queue = deque(files)
-			
-def shinra_tensei():
-	seed_fuzzing_queue()
-	commands.getoutput("mkdir %s/%s" % (menagerie, fuzzed_captures_dir))	
 	
+	for dirpath, dirnames, filenames in os.walk(menagerie):
+		for filename in filenames:
+			f = os.path.join(dirpath, filename)
+			if file_is_cap(f):
+				fuzzing_queue.append(edit_cap(f))
+
+## Run the fuzzing algoritm.		
+def shinra_tensei():
+	# seed the fuzzing queue with the menagerie capture files
+	seed_fuzzing_queue()
+	
+	# get the next capture file to fuzz from the fuzzing queue until there is no more capture file to process
 	while fuzzing_queue:
-		filename = fuzzing_queue.popleft()
-		if file_is_pcap(filename):
-			fuzz_pcap(filename)
+		f = fuzzing_queue.popleft()
+		if file_is_cap(f):
+			fuzz_cap(f)
 
 ## Parse command line options.			
 def parse_cmd():
