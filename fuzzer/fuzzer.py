@@ -18,71 +18,26 @@ menagerie = ""
 
 # the destination directory of the fuzzed capture files
 fuzzed_captures_dir = "/tmp"
+# the destination directory of the crash capture files
+crash_captures_dir = ""
 # the error probability of Editcap
-err_prob = 0.08
+err_prob = 0.02
 # the number of random fuzz per capture file of the fuzzing queue
-total_rand_fuzz_per_cap = 4
+total_rand_fuzz_per_cap = 2
 
 # the fuzzing queue containing the capture files to fuzz
 fuzzing_queue = deque()
 # the branches we have already taken in the execution path of the fuzzed process
 taken_branches = set()
-# dictionary which keys are names of capture files originating from a random fuzzing.
+# dictionary of dictionaries which keys are types of capture files.
+# The value associated with each type of capture file is a dictionary which keys are names of capture files originating from a random fuzzing.
 # The value associated with each capture file is a tuple containing the start and end offsets of the fuzzed region.
-cap_region_dict = {}
+type_cap_region_dict = {}
+# dictionary which keys are names of capture files.
+# The value associated with each capture file is its type.
+# (editcap overwrites the type of the capture files with a default value and does not support all the types of the menagerie capture files)
+cap_type_dict = {}
 
-## Fuzz a region of a capture file using Editcap.
-#  @param[in]	cap	capture file to fuzz
-#  @param[in]	region_start	start offset of the region
-#  @param[in]	region_end	end offset of the region
-#  @return		the fuzzed capture file
-def edit_cap_region(cap, region_start, region_end):
-	new_cap = "%s/%s-%f" % (fuzzed_captures_dir, filename(cap), time.time())	
-	commands.getoutput("%s -E %d -X %d -Y %d %s %s" % (editcap, err_prob, region_start, region_end, cap, new_cap))
-	return new_cap
-		
-## Fuzz regions of a capture file, thus creating new capture files. 
-## The regions are know to affect the execution path of TShark.
-#  @param[in]	cap	capture file to fuzz
-#  @return		the fuzzed capture files
-def smartly_fuzz_cap(cap):
-	new_captures = []
-	
-	print 'regions:\t %d' % len(cap_region_dict)
-	
-	for region in cap_region_dict.values():
-		region_start, region_end = region		
-		new_cap = edit_cap_region(cap, region_start, region_end)
-		new_captures.append(new_cap)
-	
-	return new_captures
-
-## Get file size in bytes.
-#  @param[in]	cap	file to process
-#  @return		the file size
-def get_cap_size(cap):
-	size = commands.getoutput("wc -c < %s" % cap)
-	return int(size)
-	
-## Fuzz random regions of a capture file, thus creating new capture files.
-#  @param[in]	cap	capture file to fuzz
-#  @return		the fuzzed capture files
-def randomly_fuzz_cap(cap):
-	new_captures = []	
-	
-	cap_size = get_cap_size(cap)	
-	for i in range(total_rand_fuzz_per_cap):
-		region_start = random.randint(0, cap_size)
-		region_end = random.randint(0, cap_size)
-		if region_start > region_end:
-			region_start, region_end = region_end, region_start
-			
-		new_cap = edit_cap_region(cap, region_start, region_end)
-		new_captures.append(new_cap)
-		cap_region_dict[new_cap] = (region_start, region_end)
-		
-	return new_captures
-	
 ## Read the execution path of a capture file and determine whether it is new.
 #  @param[in]	branches	execution path of the capture file
 #  @return		true if the execution path is new, false otherwise
@@ -95,13 +50,13 @@ def path_is_new(branches):
 ## Read the execution path of a capture file.
 #  @param[in]	cap	capture file to process
 #  @return		the execution path of the capture file
-def get_cap_path(cap):
-	cmd = "%s -injection child -t %s -- %s -nVxr %s > /dev/null" % (pin, pintool, tshark, cap)
-	
+def cap_path(cap):
+	cmd = "%s -injection child -t %s -- %s -nVxr %s > /dev/null" % (pin, pintool, tshark, cap)	
 	retcode = subprocess.call(cmd, shell=True)
-	# if TShark exited with an unexpected code (139 for segmentation fault)
+	
 	if (retcode > 0):
-		print "TShark returned %d while processing %s" % (retcode, cap)
+		print "\033[93mTShark returned %d while processing %s\033[0m" % (retcode, cap) # 139 for segmentation fault
+		commands.getoutput("cp %s %s/%s" % (cap, crash_captures_dir, filename(cap)))
 	
 	branches = [line.strip() for line in open("MyPinTool.out")]
 	return branches
@@ -114,28 +69,92 @@ def get_cap_path(cap):
 def process_cap(cap, src):
 	global fuzzing_queue, taken_branches
 	
-	if cap in cap_region_dict:
-		print 'process_cap:\t %s (%s) [%d,%d]' % (cap, src, cap_region_dict[cap][0], cap_region_dict[cap][1])
+	cap_t = cap_type_dict[cap]
+	if cap in type_cap_region_dict[cap_t]:
+		print 'process_cap:\t %s (%s) [%d,%d]' % (cap, src, type_cap_region_dict[cap_t][cap][0], type_cap_region_dict[cap_t][cap][1])
 	else:
 		print 'process_cap:\t %s (%s)' % (cap, src)
 	
-	branches = get_cap_path(cap)
+	branches = cap_path(cap)
 	
 	if path_is_new(branches):
 		print '\033[92mpath_is_new:\t %s (%s)\033[0m' % (cap, src)
 		fuzzing_queue.append(cap)
 	else:
+		commands.getoutput("rm %s" % cap)
+		
+		del cap_type_dict[cap]
+		
 		# if the capture file originates from a random fuzzing we will not remember the region for further testing
-		if cap in cap_region_dict:
-			del cap_region_dict[cap]
+		if cap in type_cap_region_dict[cap_t]:
+			del type_cap_region_dict[cap_t][cap]
 			
 	taken_branches |= set(branches)
+
+## Fuzz a region of a capture file using Editcap.
+#  @param[in]	cap	capture file to fuzz
+#  @param[in]	region_start	start offset of the region
+#  @param[in]	region_end	end offset of the region
+#  @return		the fuzzed capture file
+def edit_cap_region(cap, region_start, region_end):
+	new_cap = "%s/%s-%f" % (fuzzed_captures_dir, filename(cap), time.time())
+	commands.getoutput("%s -E %f -X %d -Y %d %s %s" % (editcap, err_prob, region_start, region_end, cap, new_cap))
+	
+	cap_type_dict[new_cap] = cap_type_dict[cap]
+	
+	return new_cap
+		
+## Fuzz regions of a capture file, thus creating new capture files. 
+## The regions are know to affect the execution path of TShark.
+#  @param[in]	cap	capture file to fuzz
+#  @return		the fuzzed capture files
+def smartly_fuzz_cap(cap):
+	new_captures = []
+	
+	cap_t = cap_type_dict[cap]
+	print 'regions:\t %d' % len(type_cap_region_dict[cap_t])
+	
+	regions = type_cap_region_dict[cap_t].values()
+	for region in regions:
+		region_start, region_end = region		
+		new_cap = edit_cap_region(cap, region_start, region_end)
+		new_captures.append(new_cap)
+	
+	return new_captures
+
+## Get file size in bytes.
+#  @param[in]	cap	file to process
+#  @return		the file size
+def cap_size(cap):
+	size = commands.getoutput("wc -c < %s" % cap)
+	return int(size)
+	
+## Fuzz random regions of a capture file, thus creating new capture files.
+#  @param[in]	cap	capture file to fuzz
+#  @return		the fuzzed capture files
+def randomly_fuzz_cap(cap):
+	new_captures = []	
+	
+	cap_s = cap_size(cap)
+	for i in range(total_rand_fuzz_per_cap):
+		region_start = random.randint(0, cap_s)
+		region_end = random.randint(0, cap_s)
+		if region_start > region_end:
+			region_start, region_end = region_end, region_start
+			
+		new_cap = edit_cap_region(cap, region_start, region_end)
+		new_captures.append(new_cap)
+		
+		new_cap_type = cap_type_dict[new_cap]
+		if new_cap_type not in type_cap_region_dict:
+			type_cap_region_dict[new_cap_type] = {}
+		type_cap_region_dict[new_cap_type][new_cap] = (region_start, region_end)
+		
+	return new_captures
 
 ## Fuzz a capture file, thus creating new capture files, and process them with TShark.
 #  @param[in]	cap	capture file to fuzz
 def fuzz_cap(cap):
-	process_cap(cap, "menagerie")
-	
 	# randomly fuzz
 	random_captures = randomly_fuzz_cap(cap)
 	for capture in random_captures:
@@ -145,6 +164,12 @@ def fuzz_cap(cap):
 	smart_captures = smartly_fuzz_cap(cap)
 	for capture in smart_captures:
 		process_cap(capture, "smart")
+		
+## Read the type of a capture file.
+#  @param[in]	cap	capture file to process
+#  @return		type of the capture file
+def cap_type(cap):
+	return commands.getoutput("capinfos %s | grep \"File type\" | sed 's/\s\s*/ /g' | cut -d \" \" -f3-" % cap)
 		
 ## Extract file name from path.
 #  @param[in]	f file path
@@ -157,8 +182,11 @@ def filename(f):
 #  @param[in]	cap	capture file to process
 #  @return		Editcap	output file
 def edit_cap(cap):
-	new_cap = "%s/%s" % (fuzzed_captures_dir, filename(cap))
-	commands.getoutput("%s %s %s" % (editcap, cap, new_cap))
+	new_cap = "%s/%s" % (fuzzed_captures_dir, filename(cap))	
+	commands.getoutput("%s %s %s" % (editcap, cap, new_cap))	
+	
+	cap_type_dict[new_cap] = cap_type(cap)
+	
 	return new_cap
 	
 ## Check if a file is a capture file.
@@ -213,6 +241,9 @@ def parse_cmd():
 	menagerie = options.menagerie
 	tshark = options.tshark
 	editcap = options.editcap
+	
+	crash_captures_dir = "%s/crash" % menagerie
+	commands.getoutput("mkdir %s" % crash_captures_dir)
 
 def main():
 	parse_cmd()
