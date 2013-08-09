@@ -1,5 +1,11 @@
 #!/usr/bin/python
 
+__doc__ = '''\
+distill_menagerie.py
+
+Increases the quality of a capture file collection.
+'''
+
 import sys
 from optparse import OptionParser
 from os import listdir
@@ -13,6 +19,13 @@ pintool = ""
 menagerie = ""
 
 cnt = 0
+
+def exit_msg(msg=None, status=1):
+	if msg is not None:
+		sys.stderr.write(msg + '\n\n')
+	sys.stderr.write(__doc__ + '\n')
+	sys.exit(status)
+
 
 # branch_pcap_dic sample:
 #
@@ -104,6 +117,7 @@ def distill_menagerie():
 	global cnt
 
 	files = listdir(menagerie)
+	print('Total file count: %d' % len(files))
 	for filename in files:
 		if file_is_pcap(filename):
 			print filename
@@ -111,6 +125,9 @@ def distill_menagerie():
 			read_pcap_path(filename)
 			cnt = cnt+1
 			print cnt
+	print('Pcap count: %d' % cnt)
+	if (cnt < 1):
+		exit_msg('No valid capture files found.')
 			
 	fill_branch_pcap_dic_counters()	
 	captures_to_rm = get_captures_to_rm(files)
@@ -142,4 +159,18 @@ def main():
 	distill_menagerie()
 
 if __name__ == "__main__":
-    main()
+	main()
+
+#
+# Editor modelines  -  http://www.wireshark.org/tools/modelines.html
+#
+# Local variables:
+# c-basic-offset: 8
+# tab-width: 8
+# indent-tabs-mode: t
+# End:
+#
+# vi: set shiftwidth=8 tabstop=8 noexpandtab:
+# :indentSize=8:tabSize=8:noTabs=false:
+#
+
