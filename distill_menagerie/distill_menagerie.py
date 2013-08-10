@@ -8,9 +8,11 @@ Increases the quality of a capture file collection.
 
 import sys
 from optparse import OptionParser
-from os import listdir
+import os
+import os.path
 import operator
 import commands
+import subprocess
 
 # command line arguments
 tshark = ""
@@ -19,6 +21,8 @@ pintool = ""
 menagerie = ""
 
 cnt = 0
+
+devnull = open(os.devnull, 'w')
 
 def exit_msg(msg=None, status=1):
 	if msg is not None:
@@ -101,22 +105,35 @@ def read_pcap_path(pcap):
 ## Run TShark on a capture file under Pin and store the execution path of TShark into "MyPinTool.out" file.
 #  @param[in]	pcap	capture file to process with TShark
 def write_pcap_path(pcap):
-	commands.getoutput("%s -injection child -t %s -- %s -nVxr %s/%s > /dev/null" % (pin, pintool, tshark, menagerie, pcap))
+	pcap_path = os.path.join(menagerie, pcap)
+	res = subprocess.call([
+		pin,
+		'-injection', 'child',
+		'-t', pintool,
+		'--',
+		tshark, '-nVxr', pcap_path,
+		],
+		stdout=devnull, stderr=devnull)
+	print('Results for %s: %s' % (pcap_path, res))
+		#"%s -injection child -t %s -- %s -nVxr %s/%s > /dev/null" % (pin, pintool, tshark, menagerie, pcap))
 
 ## Check if a file is a capture file.
 #  @param[in]	filename	name of the file to process
 #  @return		true if file is a capture file, false otherwise	
 def file_is_pcap(filename):
-	error = commands.getoutput("capinfos %s/%s > /dev/null" % (menagerie, filename))
-	if error:
-		return False		
+	file_path = os.path.join(menagerie, filename)
+	capinfos = os.path.join(os.path.dirname(tshark), 'capinfos')
+	try:
+		subprocess.check_call([capinfos, file_path], stdout=devnull, stderr=devnull)
+	except subprocess.CalledProcessError:
+		return False
 	return True
 	
 ## Distill the menagerie.
 def distill_menagerie():
 	global cnt
 
-	files = listdir(menagerie)
+	files = os.listdir(menagerie)
 	print('Total file count: %d' % len(files))
 	for filename in files:
 		if file_is_pcap(filename):
