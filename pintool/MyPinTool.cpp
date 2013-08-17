@@ -135,23 +135,24 @@ void init_app_imgs_names()
 	app_imgs_names.push_back("libwiretap");
 	app_imgs_names.push_back("libwireshark");
 	app_imgs_names.push_back("libwsutil");
+	app_imgs_names.push_back("plugins");
 }
 
 int main(int argc, char* argv[])
 {
 	// initialize the names of the application images
 	init_app_imgs_names();
-
+	
 	// initialize symbol processing
     PIN_InitSymbols();
-
-	// initialize pin
+    
+    // initialize pin
 	if (PIN_Init(argc, argv)) return Usage();
 	
 	// register ImageLoad to be called when an image is loaded
     IMG_AddInstrumentFunction(ImageLoad, 0);
    	
-   	// register Instruction to be called to instrument instructions
+	// register Instruction to be called to instrument instructions
     INS_AddInstrumentFunction(Instruction, 0);
     
     // register Fini to be called when the application exits
