@@ -20,6 +20,8 @@ menagerie = ""
 fuzzed_captures_dir = "/tmp"
 # the destination directory of the crash capture files
 crash_captures_dir = ""
+# the destination directory of the bug capture files
+bug_captures_dir = ""
 # the error probability of Editcap
 err_prob = 0.02
 # the number of random fuzz per capture file of the fuzzing queue
@@ -51,11 +53,19 @@ def path_is_new(branches):
 #  @param[in]	cap	capture file to process
 #  @return		the execution path of the capture file
 def cap_path(cap):
-	cmd = "%s -injection child -t %s -- %s -nVxr %s > /dev/null" % (pin, pintool, tshark, cap)	
-	retcode = subprocess.call(cmd, shell=True)
+	cmd = "%s -injection child -t %s -- %s -nVxr %s > /dev/null" % (pin, pintool, tshark, cap)
+	child = subprocess.Popen(cmd, shell=True, stderr=subprocess.PIPE)
 	
-	if (retcode > 0):
-		print "\033[93mTShark returned %d while processing %s\033[0m" % (retcode, cap) # 139 for segmentation fault
+	err = child.communicate()[1]
+	if err:
+		print err
+		commands.getoutput("cp %s %s/%s" % (cap, bug_captures_dir, filename(cap)))
+		commands.getoutput("touch %s/%s.txt" % (bug_captures_dir, filename(cap)))
+		commands.getoutput("echo \"%s\" > %s/%s.txt" % (err, bug_captures_dir, filename(cap)))
+	
+	retcode = child.returncode	
+	if (retcode < 0):
+		print "\033[93mTShark was terminated by signal %d while processing %s\033[0m" % (-retcode, cap) # 139 for segmentation fault
 		commands.getoutput("cp %s %s/%s" % (cap, crash_captures_dir, filename(cap)))
 	
 	branches = [line.strip() for line in open("MyPinTool.out")]
@@ -70,15 +80,17 @@ def process_cap(cap, src):
 	global fuzzing_queue, taken_branches
 	
 	cap_t = cap_type_dict[cap]
+	'''
 	if cap in type_cap_region_dict[cap_t]:
 		print 'process_cap:\t %s (%s) [%d,%d]' % (cap, src, type_cap_region_dict[cap_t][cap][0], type_cap_region_dict[cap_t][cap][1])
 	else:
 		print 'process_cap:\t %s (%s)' % (cap, src)
+	'''
 	
 	branches = cap_path(cap)
 	
 	if path_is_new(branches):
-		print '\033[92mpath_is_new:\t %s (%s)\033[0m' % (cap, src)
+		# print '\033[92mpath_is_new:\t %s (%s)\033[0m' % (cap, src)
 		fuzzing_queue.append(cap)
 	else:
 		commands.getoutput("rm %s" % cap)
@@ -222,6 +234,7 @@ def shinra_tensei():
 ## Parse command line options.			
 def parse_cmd():
 	global pin, pintool, menagerie, tshark, editcap
+	global crash_captures_dir, bug_captures_dir
 
 	parser = OptionParser()
 	parser.add_option("-p", "--pin", dest="pin", help="location of pin")
@@ -244,6 +257,9 @@ def parse_cmd():
 	
 	crash_captures_dir = "%s/crash" % menagerie
 	commands.getoutput("mkdir %s" % crash_captures_dir)
+	
+	bug_captures_dir = "%s/bug" % menagerie
+	commands.getoutput("mkdir %s" % bug_captures_dir)
 
 def main():
 	parse_cmd()
